@@ -5,15 +5,19 @@
 
 <div class="card">
   <p>CSV 需包含且仅需四列：<code>流水号</code>、<code>SKU</code>、<code>出库时刻</code>（ISO-8601 UTC，如 <code>2026-03-01T08:00:00Z</code>）、<code>箱数</code>（正整数）。
-     整份文件必须同属一个 UTC 月份，且流水号全局唯一。校验不通过时不会写入任何数据。</p>
+     整份文件必须同属一个 UTC 月份；同仓流水号跨月唯一，异仓可重复。校验不通过时不会写入任何数据。</p>
   <form method="post" action="{{ url_for('upload_submit') }}" enctype="multipart/form-data" class="stack">
+    <label>仓号（留空为默认仓 <code>{{ default_warehouse }}</code>；两座冷库请分别填不同仓号）
+      <input type="text" name="warehouse" value="{{ selected_warehouse if selected_warehouse != default_warehouse else '' }}"
+             placeholder="例如 WH-A / WH-B，留空=默认仓" pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,63}">
+    </label>
     <label>CSV 文件
       <input type="file" name="file" accept=".csv,text/csv" required>
     </label>
     <label>指定月份（可选，形如 2026-03；填了就必须与文件一致）
       <input type="text" name="month" placeholder="2026-03" pattern="\d{4}-\d{2}">
     </label>
-    <button type="submit">上传并固定该月事实</button>
+    <button type="submit">上传并固定该仓该月事实</button>
   </form>
 </div>
 
@@ -22,5 +26,6 @@
 <pre class="sample">流水号,SKU,出库时刻,箱数
 OUT-0001,SKU-A,2026-03-01T01:00:00Z,12
 OUT-0002,SKU-B,2026-03-05T23:30:00Z,7</pre>
+  <p class="muted">两座冷库的同名流水号（如各有一份 001）互不冲突：仓号不同即可分别入账。</p>
 </div>
 {% endblock %}

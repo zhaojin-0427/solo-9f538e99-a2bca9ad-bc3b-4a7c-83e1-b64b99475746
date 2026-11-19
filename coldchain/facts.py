@@ -11,6 +11,7 @@ import sqlite3
 from .db import transaction
 from .errors import ConflictError, ValidationError
 from .timeutil import datetime_to_us, format_utc, month_of, now_str, parse_utc, validate_month
+from .warehouses import DEFAULT_WAREHOUSE, ensure_warehouse, normalize_warehouse
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_ROWS = 50_000
@@ -222,44 +223,57 @@ def parse_csv(raw, expected_month=None):
     return month, rows, sha256
 
 
-def ingest_month(conn, raw, filename, expected_month=None):
-    """Validate then freeze one month. All-or-nothing."""
+def ingest_month(conn, raw, filename, expected_month=None, warehouse=None):
+    """Validate then freeze one month for one warehouse. All-or-nothing.
+
+    Each warehouse freezes UTC month closes independently. The same month
+    may be booked by different warehouses and sequence numbers are unique
+    per warehouse across months, so two warehouses can both use sequence
+    001 while one warehouse cannot reuse a sequence in another month.
+    """
+    warehouse = normalize_warehouse(warehouse)
     month, rows, sha256 = parse_csv(raw, expected_month=expected_month)
     safe_name = (filename or "upload.csv").strip()[:255] or "upload.csv"
     total_boxes = sum(row["boxes"] for row in rows)
 
     with transaction(conn):
         exists = conn.execute(
-            "SELECT month, frozen_at FROM months WHERE month = ?", (month,)
+            "SELECT month, frozen_at FROM months WHERE warehouse = ? AND month = ?",
+            (warehouse, month),
         ).fetchone()
         if exists:
             raise ConflictError(
-                f"{month} 的事实已于 {exists['frozen_at']} 固定，不能重复上传或改写"
+                f"仓号 {warehouse} 的 {month} 事实已于 {exists['frozen_at']} 固定，"
+                "不能重复上传或改写"
             )
         seqs = [row["sequence_no"] for row in rows]
         for start in range(0, len(seqs), 400):
             chunk = seqs[start : start + 400]
             placeholders = ",".join("?" for _ in chunk)
             clash = conn.execute(
-                f"SELECT sequence_no FROM shipments WHERE sequence_no IN ({placeholders}) LIMIT 1",
-                chunk,
+                f"SELECT sequence_no FROM shipments"
+                f" WHERE warehouse = ? AND sequence_no IN ({placeholders}) LIMIT 1",
+                (warehouse, *chunk),
             ).fetchone()
             if clash:
                 raise ConflictError(
-                    f"流水号 {clash['sequence_no']} 已存在于其他月份，流水号必须全局唯一"
+                    f"仓号 {warehouse} 中流水号 {clash['sequence_no']} 已存在于其他月份，"
+                    "同仓流水号跨月必须唯一"
                 )
         frozen_at = now_str()
         try:
+            ensure_warehouse(conn, warehouse)
             conn.execute(
-                "INSERT INTO months(month, source_filename, source_sha256, row_count, total_boxes, frozen_at)"
-                " VALUES(?,?,?,?,?,?)",
-                (month, safe_name, sha256, len(rows), total_boxes, frozen_at),
+                "INSERT INTO months(warehouse, month, source_filename, source_sha256,"
+                " row_count, total_boxes, frozen_at) VALUES(?,?,?,?,?,?,?)",
+                (warehouse, month, safe_name, sha256, len(rows), total_boxes, frozen_at),
             )
             conn.executemany(
-                "INSERT INTO shipments(month, sequence_no, sku, occurred_at, occurred_at_us, boxes, source_row)"
-                " VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO shipments(warehouse, month, sequence_no, sku, occurred_at,"
+                " occurred_at_us, boxes, source_row) VALUES(?,?,?,?,?,?,?,?)",
                 [
                     (
+                        warehouse,
                         month,
                         row["sequence_no"],
                         row["sku"],
@@ -275,9 +289,16 @@ def ingest_month(conn, raw, filename, expected_month=None):
             raise ConflictError(f"写入被拒绝：{exc}（未产生任何数据）") from exc
         conn.execute(
             "INSERT INTO audit_log(at, action, month, version_no, summary) VALUES(?,?,?,?,?)",
-            (frozen_at, "freeze_month", month, None, f"固定 {month} 共 {len(rows)} 行 / {total_boxes} 箱"),
+            (
+                frozen_at,
+                "freeze_month",
+                month,
+                None,
+                f"仓号 {warehouse} 固定 {month} 共 {len(rows)} 行 / {total_boxes} 箱",
+            ),
         )
     return {
+        "warehouse": warehouse,
         "month": month,
         "row_count": len(rows),
         "total_boxes": total_boxes,
@@ -286,8 +307,10 @@ def ingest_month(conn, raw, filename, expected_month=None):
     }
 
 
-def list_months(conn):
+def list_months(conn, warehouse=None):
+    warehouse = normalize_warehouse(warehouse)
     return conn.execute(
-        "SELECT m.month, m.row_count, m.total_boxes, m.frozen_at, m.source_filename"
-        " FROM months m ORDER BY m.month DESC"
+        "SELECT m.warehouse, m.month, m.row_count, m.total_boxes, m.frozen_at, m.source_filename"
+        " FROM months m WHERE m.warehouse = ? ORDER BY m.month DESC",
+        (warehouse,),
     ).fetchall()

@@ -21,6 +21,17 @@ from . import facts, knowledge
 from .db import connect, db_path_from_env, init_db
 from .errors import ConflictError, NotFoundError, ValidationError
 from .timeutil import display_utc
+from .warehouses import DEFAULT_WAREHOUSE, list_warehouses, normalize_warehouse
+
+
+def _warehouse_from_request():
+    """Warehouse code for the current request; absent/blank means default.
+
+    ``request.values`` covers both the query string and form fields
+    (including multipart uploads), so old links and API calls without a
+    warehouse parameter keep reading and writing the default warehouse.
+    """
+    return normalize_warehouse(request.values.get("warehouse"))
 
 
 def _raw_intervals_from_form(form):
@@ -143,37 +154,55 @@ def create_app(test_config=None):
     @app.get("/")
     def index():
         db = get_db()
-        months = facts.list_months(db)
+        warehouse = _warehouse_from_request()
+        months = facts.list_months(db, warehouse)
+        warehouses = list_warehouses(db)
         versions = knowledge.list_versions(db)
         return render_template(
             "index.html",
             months=months,
+            warehouses=warehouses,
+            selected_warehouse=warehouse,
+            default_warehouse=DEFAULT_WAREHOUSE,
             versions=versions,
             latest=versions[0] if versions else None,
         )
 
     @app.get("/upload")
     def upload_page():
-        return render_template("upload.html")
+        return render_template(
+            "upload.html",
+            selected_warehouse=_warehouse_from_request(),
+            default_warehouse=DEFAULT_WAREHOUSE,
+        )
 
     @app.post("/upload")
     def upload_submit():
         upload = request.files.get("file")
         if upload is None or not upload.filename:
             raise ValidationError("请选择要上传的 CSV 文件")
+        warehouse = _warehouse_from_request()
         raw = upload.read()
         result = facts.ingest_month(
             get_db(),
             raw,
             filename=upload.filename,
             expected_month=request.form.get("month") or None,
+            warehouse=warehouse,
         )
         flash(
-            f"{result['month']} 已固定：{result['row_count']} 行，共 {result['total_boxes']} 箱。"
-            "该月事实此后不可修改。",
+            f"仓号 {result['warehouse']} 的 {result['month']} 已固定："
+            f"{result['row_count']} 行，共 {result['total_boxes']} 箱。"
+            "该仓该月事实此后不可修改。",
             "success",
         )
-        return redirect(url_for("report_page", month=result["month"]))
+        return redirect(
+            url_for(
+                "report_page",
+                month=result["month"],
+                warehouse=result["warehouse"],
+            )
+        )
 
     @app.get("/knowledge")
     def knowledge_page():
@@ -240,16 +269,21 @@ def create_app(test_config=None):
     @app.get("/report")
     def report_page():
         db = get_db()
-        months = facts.list_months(db)
+        warehouse = _warehouse_from_request()
+        warehouses = list_warehouses(db)
+        months = facts.list_months(db, warehouse)
         versions = knowledge.list_versions(db)
         month = request.args.get("month") or (months[0]["month"] if months else None)
         version_param = request.args.get("version") or None
         report = None
         if month:
-            report = knowledge.build_report(db, month, version_param)
+            report = knowledge.build_report(db, month, version_param, warehouse=warehouse)
         return render_template(
             "report.html",
             months=months,
+            warehouses=warehouses,
+            selected_warehouse=warehouse,
+            default_warehouse=DEFAULT_WAREHOUSE,
             versions=versions,
             report=report,
             selected_month=month,
@@ -258,13 +292,26 @@ def create_app(test_config=None):
 
     # ---------- API ----------
 
-    @app.get("/api/months")
-    def api_months():
+    @app.get("/api/warehouses")
+    def api_warehouses():
         db = get_db()
         return jsonify(
             {
                 "ok": True,
-                "months": [dict(row) for row in facts.list_months(db)],
+                "default_warehouse": DEFAULT_WAREHOUSE,
+                "warehouses": [dict(row) for row in list_warehouses(db)],
+            }
+        )
+
+    @app.get("/api/months")
+    def api_months():
+        db = get_db()
+        warehouse = _warehouse_from_request()
+        return jsonify(
+            {
+                "ok": True,
+                "warehouse": warehouse,
+                "months": [dict(row) for row in facts.list_months(db, warehouse)],
             }
         )
 
@@ -278,6 +325,7 @@ def create_app(test_config=None):
             upload.read(),
             filename=upload.filename,
             expected_month=request.form.get("month") or None,
+            warehouse=_warehouse_from_request(),
         )
         result["ok"] = True
         return jsonify(result), 201
@@ -324,7 +372,12 @@ def create_app(test_config=None):
         month = request.args.get("month")
         if not month:
             raise ValidationError("缺少 month 参数（YYYY-MM）")
-        report = knowledge.build_report(db, month, request.args.get("version") or None)
+        report = knowledge.build_report(
+            db,
+            month,
+            request.args.get("version") or None,
+            warehouse=_warehouse_from_request(),
+        )
         return jsonify({"ok": True, **knowledge.report_json(report)})
 
     @app.get("/api/audit")

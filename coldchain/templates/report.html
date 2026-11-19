@@ -4,6 +4,18 @@
 <h1>月报核对</h1>
 
 <form method="get" action="{{ url_for('report_page') }}" class="card inline">
+  <label>仓号
+    <select name="warehouse" onchange="this.form.requestSubmit()">
+      {% for wh in warehouses %}
+        <option value="{{ wh.warehouse }}" {{ 'selected' if wh.warehouse == selected_warehouse else '' }}>
+          {{ wh.warehouse }}{% if wh.warehouse == default_warehouse %}（默认仓）{% endif %}
+        </option>
+      {% endfor %}
+      {% if not warehouses %}
+        <option value="{{ selected_warehouse }}">{{ selected_warehouse }}</option>
+      {% endif %}
+    </select>
+  </label>
   <label>月份
     <select name="month" required>
       {% for month in months %}
@@ -21,15 +33,15 @@
   </label>
   <button type="submit">查询</button>
   {% if report %}
-    <a class="button ghost" href="{{ url_for('api_report', month=report.month, version=report.version.version_no if report.version else '') }}">JSON</a>
+    <a class="button ghost" href="{{ url_for('api_report', month=report.month, warehouse=report.warehouse, version=report.version.version_no if report.version else '') }}">JSON</a>
   {% endif %}
 </form>
 
 {% if not months %}
-  <p class="muted">尚无已固定月份，请先<a href="{{ url_for('upload_page') }}">上传月结 CSV</a>。</p>
+  <p class="muted">仓号 {{ selected_warehouse }} 尚无已固定月份，请先<a href="{{ url_for('upload_page', warehouse=selected_warehouse) }}">上传月结 CSV</a>。</p>
 {% elif report %}
   <section class="card">
-    <h2>{{ report.month }} 汇总
+    <h2>{{ report.warehouse }} · {{ report.month }} 汇总
       {% if report.version %}
         <span class="badge">口径 v{{ report.version.version_no }}</span>
       {% else %}
@@ -37,8 +49,8 @@
       {% endif %}
     </h2>
     <p class="muted">
-      该月事实固定于 {{ display_utc(report.month_row.frozen_at) }}（来源 {{ report.month_row.source_filename }}）；
-      共 {{ report.total_shipments }} 条出库 / {{ report.total_boxes }} 箱。
+      该仓该月事实固定于 {{ display_utc(report.month_row.frozen_at) }}（来源 {{ report.month_row.source_filename }}）；
+      共 {{ report.total_shipments }} 条出库 / {{ report.total_boxes }} 箱，箱数与明细均只统计仓号 {{ report.warehouse }}。
       {% if report.version %}所用版号创建于 {{ display_utc(report.version.created_at) }}，原因：{{ report.version.reason }}。{% endif %}
     </p>
     <div class="totals">
@@ -72,10 +84,11 @@
     <section class="card" id="zone-{{ loop.index }}">
       <h2>温区 {{ bucket.zone }} · {{ bucket.boxes }} 箱</h2>
       <table class="compact">
-        <thead><tr><th>流水号</th><th>SKU</th><th>出库时刻</th><th>箱数</th><th>依据区间（起含止不含）</th></tr></thead>
+        <thead><tr><th>仓号</th><th>流水号</th><th>SKU</th><th>出库时刻</th><th>箱数</th><th>依据区间（起含止不含）</th></tr></thead>
         <tbody>
         {% for item in bucket.shipments %}
           <tr>
+            <td class="mono">{{ item.warehouse }}</td>
             <td class="mono">{{ item.sequence_no }}</td>
             <td>{{ item.sku }}</td>
             <td class="mono">{{ display_utc(item.occurred_at) }}</td>
@@ -93,10 +106,11 @@
     {% if report.unclassified.shipments %}
       <p class="muted">这些出库落在该 SKU 已登记区间之外的空档，或该 SKU 在本版号中没有区间。</p>
       <table class="compact">
-        <thead><tr><th>流水号</th><th>SKU</th><th>出库时刻</th><th>箱数</th><th>本版该 SKU 的区间</th></tr></thead>
+        <thead><tr><th>仓号</th><th>流水号</th><th>SKU</th><th>出库时刻</th><th>箱数</th><th>本版该 SKU 的区间</th></tr></thead>
         <tbody>
         {% for item in report.unclassified.shipments %}
           <tr>
+            <td class="mono">{{ item.warehouse }}</td>
             <td class="mono">{{ item.sequence_no }}</td>
             <td>{{ item.sku }}</td>
             <td class="mono">{{ display_utc(item.occurred_at) }}</td>

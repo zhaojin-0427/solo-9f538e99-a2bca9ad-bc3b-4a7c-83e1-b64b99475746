@@ -339,22 +339,29 @@ def _row_to_interval(row):
     }
 
 
-def build_report(conn, month, requested_version=None):
-    """Compute a report for exactly one version and one month.
+def build_report(conn, month, requested_version=None, warehouse=None):
+    """Compute a report for exactly one version, one month and one warehouse.
 
+    The temperature-zone knowledge ledger is shared across warehouses, but
+    box totals and shipment details only count the selected warehouse.
     Facts and the selected version's ranges are read in a single read
     transaction so a concurrent correction can never leak into this report.
     """
     from .timeutil import validate_month
+    from .warehouses import normalize_warehouse
 
+    warehouse = normalize_warehouse(warehouse)
     try:
         month = validate_month(month)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
     with transaction(conn, immediate=False):
-        month_row = conn.execute("SELECT * FROM months WHERE month = ?", (month,)).fetchone()
+        month_row = conn.execute(
+            "SELECT * FROM months WHERE warehouse = ? AND month = ?",
+            (warehouse, month),
+        ).fetchone()
         if month_row is None:
-            raise NotFoundError(f"月份 {month} 尚未上传出库事实")
+            raise NotFoundError(f"仓号 {warehouse} 的月份 {month} 尚未上传出库事实")
         version_row = resolve_version(conn, requested_version)
         version_no = version_row["version_no"] if version_row else None
 
@@ -379,9 +386,10 @@ def build_report(conn, month, requested_version=None):
         }
 
         shipments = conn.execute(
-            "SELECT id, sequence_no, sku, occurred_at, occurred_at_us, boxes"
-            " FROM shipments WHERE month = ? ORDER BY occurred_at_us, id",
-            (month,),
+            "SELECT id, warehouse, sequence_no, sku, occurred_at, occurred_at_us, boxes"
+            " FROM shipments WHERE warehouse = ? AND month = ?"
+            " ORDER BY occurred_at_us, id",
+            (warehouse, month),
         ).fetchall()
 
     buckets = {}
@@ -392,6 +400,7 @@ def build_report(conn, month, requested_version=None):
         intervals, starts = indexed.get(shipment["sku"], ((), ()))
         interval = classify(shipment["occurred_at_us"], intervals, starts)
         record = {
+            "warehouse": shipment["warehouse"],
             "sequence_no": shipment["sequence_no"],
             "sku": shipment["sku"],
             "occurred_at": shipment["occurred_at"],
@@ -425,8 +434,10 @@ def build_report(conn, month, requested_version=None):
     unclassified_boxes = sum(item["boxes"] for item in unclassified)
 
     return {
+        "warehouse": warehouse,
         "month": month,
         "month_row": {
+            "warehouse": month_row["warehouse"],
             "month": month_row["month"],
             "row_count": month_row["row_count"],
             "total_boxes": month_row["total_boxes"],
@@ -468,6 +479,7 @@ def _shipment_json(item):
         }
 
     payload = {
+        "warehouse": item["warehouse"],
         "sequence_no": item["sequence_no"],
         "sku": item["sku"],
         "occurred_at": item["occurred_at"],
@@ -493,6 +505,7 @@ def _shipment_json(item):
 def report_json(report):
     """Convert report structures into JSON-ready payloads."""
     payload = {
+        "warehouse": report["warehouse"],
         "month": report["month"],
         "version": report["version"],
         "month_fact": report["month_row"],
